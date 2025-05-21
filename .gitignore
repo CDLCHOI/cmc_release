@@ -1,0 +1,7 @@
+./.vscode/
+output/
+models/critic.py
+run.sh
+dataset/HumanML3D/
+dataset/KIT-ML/
+checkpoints/
