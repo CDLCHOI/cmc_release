@@ -1,8 +1,0 @@
-.vscode/
-.gitignore
-output/*
-run.sh
-dataset/HumanML3D/
-dataset/KIT-ML/
-checkpoints/
-*.sh

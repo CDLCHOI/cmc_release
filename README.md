@@ -41,7 +41,23 @@ Extract the downloaded files into the `output/` directory. The file structure sh
 
 ### 3. Download the evaluator
 
-Follow [MoMask Github](https://github.com/EricGuo5513/momask-codes)
+Follow [MoMask Github](https://github.com/EricGuo5513/momask-codes). The structure should look like this:
+
+```text
+./checkpoints/
+├── t2m/
+│   ├── text_mot_match
+└── kit/
+    ├── text_mot_match
+
+```
+
+### 4. Soft link to your dataset path
+
+```bash
+ln -s /path/to/dataset/HumanML3D/ dataset/HumanML3D/
+ln -s /path/to/dataset/KIT-ML/ dataset/KIT-ML/
+```
 
 ---
 
