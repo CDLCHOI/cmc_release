@@ -39,6 +39,10 @@ Extract the downloaded files into the `output/` directory. The file structure sh
 
 ```
 
+### 3. Download the evaluator
+
+Follow [MoMask Github](https://github.com/EricGuo5513/momask-codes)
+
 ---
 
 ## 🚀 Training
@@ -48,14 +52,22 @@ To train your own model from scratch, execute the following commands.
 **Training CMC HumanML3D Stage 1:**
 
 ```bash
-python train.py --exp_name cmc_humanml3d_s1 --batch_size 128 --gpu 2 --overwrite --save_iter 10000 --total_iter 600000 --lr 1e-4 --lr-scheduler 300000 --modeltype s1 --multi_joint_control
+python train.py \
+    --exp_name cmc_humanml3d_s1 \
+    --batch_size 128 --gpu 2 --overwrite --save_iter 10000 \
+    --total_iter 600000 --lr 1e-4 --lr-scheduler 300000 \
+    --modeltype s1 --multi_joint_control
 
 ```
 
 **Training CMC HumanML3D Stage 2:**
 
 ```bash
-python train.py --exp_name cmc_humanml3d_s2 --batch_size 128 --gpu 2 --overwrite --save_iter 10000 --total_iter 600000 --lr 1e-4 --lr-scheduler 300000 --modeltype s2 --multi_joint_control
+python train.py \
+    --exp_name cmc_humanml3d_s2 \
+    --batch_size 128 --gpu 2 --overwrite --save_iter 10000 \
+    --total_iter 600000 --lr 1e-4 --lr-scheduler 300000 \
+    --modeltype s2 --multi_joint_control
 
 ```
 
@@ -68,21 +80,34 @@ We provide several evaluation scripts for different configurations. For multi-jo
 **1. HumanML3D (Stage 1 + Stage 2) | DDPM 1000+1000 steps:**
 
 ```bash
-python eval_cmc.py --resume_root output/cmc_humanml3d/cmc_humanml3d_s1.pth --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth --dataset_name t2m --control_joint 0 --density 100 --gpu 3
+python eval_cmc.py \
+    --resume_root output/cmc_humanml3d/cmc_humanml3d_s1.pth \
+    --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth \
+    --dataset_name t2m \
+    --control_joint 0 --density 100 --gpu 3
 
 ```
 
 **2. HumanML3D (Stage 1 + Stage 2) | DDIM 100+100 steps:**
 
 ```bash
-python eval_cmc.py --resume_root output/cmc_humanml3d/cmc_humanml3d_s1.pth --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth --dataset_name t2m --control_joint 0 --density 100 --gpu 3 --S1_diffusion_step 100 --S2_diffusion_step 100
+python eval_cmc.py \
+    --resume_root output/cmc_humanml3d/cmc_humanml3d_s1.pth \
+    --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth \
+    --dataset_name t2m \
+    --control_joint 0 --density 100 --gpu 3 \
+    --S1_diffusion_step 100 --S2_diffusion_step 100
 
 ```
 
 **3. HumanML3D (Stage 2 Only) | Text-to-Motion:**
 
 ```bash
-python eval_cmc.py --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth --dataset_name t2m --gpu 3 --only_t2m_s2 1
+python eval_cmc.py \
+    --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth \
+    --dataset_name t2m \
+    --gpu 3 \
+    --only_t2m_s2 1
 ```
 
 **4. HumanML3D Sample:**
