@@ -9,14 +9,13 @@ from tqdm import tqdm
 
 from torch.utils.data._utils.collate import default_collate
 from utils.word_vectorizer import WordVectorizer
-from options.get_eval_option import get_opt
 from utils.motion_process import recover_root_rot_pos, recover_from_ric, recover_from_rot
 import sys
 
 from data_loaders.humanml.utils.paramUtil import t2m_raw_offsets, t2m_kinematic_chain
 from data_loaders.humanml.common.skeleton import Skeleton
 from data_loaders.humanml.common.quaternion import cont6d_to_quat
-import ipdb
+from data_loaders.humanml.utils.get_opt import get_opt
 
 def create_trajmask263(joint_ids, frames=None, dataset_name='t2m', mode='train'):
     """ create trajectory mask for motion representation in HumanML3D/KIT for DiffMoAE
@@ -50,32 +49,6 @@ def create_trajmask263(joint_ids, frames=None, dataset_name='t2m', mode='train')
         traj_mask[frames, i] = True
         traj_mask_263[frames, 4+3*(i-1):4+3*i] = True # ric  21*3
 
-    # 于2024-11-09修改 
-    # 为了让验证的时候，控制非根节点不送根节点的y到2阶段也能指标好
-    # 只有在控制根的时候才将根的前4个值设为True；控制非根的时候只设前3个为True
-    # if 0 in joint_ids:
-    #     if np.random.choice([0,1]):
-    #         traj_mask_263[:, 4] = True # 这都错了   index4都不是对应的y， 而且后面非控制的根不应该送进来
-    # traj_mask_263[:, :3] = True 
-
-    # 于2024-11-11修改
-    # traj_mask是给一阶段算loss用的，以及hint，帧用的是选定好的帧即 frames
-    # traj_mask_263是给二阶段替换值。2阶段应该包含1阶段最后一帧之前的所有帧即 all_frames_idx
-    # max_frame = max(frames)
-    # all_frames_idx = np.arange(max_frame)
-    # if 0 in joint_ids:
-    #     if mode == 'train': # 训练0的话，随便用或者不用根的y
-    #         if np.random.choice([0,1]):
-    #             traj_mask_263[all_frames_idx, 3] = True # index3对应的根y，切不应该把所有的帧都置True，仅与
-    #     else: # 验证模式必用y，实际在comp文件里通过参数设定是否去掉y
-    #         traj_mask_263[all_frames_idx, 3] = True
-    #     traj_mask[frames, 0, :] = True
-    # traj_mask_263[all_frames_idx, :3] = True # ge
-    
-    # joint_ids = joint_ids[joint_ids!=0] # 去掉0号
-    # for i in joint_ids:
-    #     traj_mask[frames, i] = True
-    #     traj_mask_263[frames, 4+3*(i-1):4+3*i] = True # 非根节点不需要所有帧都置True，只需要被控制的帧即可
     return traj_mask, traj_mask_263
 
 def collate_fn(batch):
@@ -86,8 +59,8 @@ def collate_fn(batch):
 '''For use of training text motion matching model, and evaluations'''
 class ControlDataset(data.Dataset):
     def __init__(self, opt, mean, std, split_file, w_vectorizer, mode, 
-                 control_joint=0, density=100, dataset_name='t2m', normalize_traj=False, 
-                 multi_joint_control=False, unit_length=None, codebook_dir=None, dense_control=False):
+                 control_joint=0, density=100, dataset_name='t2m', 
+                 multi_joint_control=False, unit_length=None):
         
         self.opt = opt
         self.w_vectorizer = w_vectorizer
@@ -98,20 +71,11 @@ class ControlDataset(data.Dataset):
         self.mode = mode
         self.control_joint = control_joint
         self.density = density
-        self.normalize_traj = normalize_traj
         self.multi_joint_control = multi_joint_control
         # print('self.control_joint = ', self.control_joint)
         # print('self.density = ', self.density)
         assert  0 <= self.density <= 100, "density should be in [0, 100], got {}".format(self.density)
 
-        # 以下是VQ相关的
-        self.unit_length = unit_length # 1个token对应实际的动作长度，如果VQVAE里下采样2次，那么unit_length=4
-        self.codebook_dir = codebook_dir # 训练前预存的motion tokens的路径 output/vq/vq_name/codebook
-        # self.codebook_size = codebook_size
-        self.dense_control = dense_control
-        # self.motion_end_idx = codebook_size
-        # self.motion_pad_idx = codebook_size + 1
-        self.max_token_length = 26 if unit_length == 8 else 50
         min_motion_len = 40 if self.opt.dataset_name =='t2m' else 24
         
 
@@ -134,8 +98,6 @@ class ControlDataset(data.Dataset):
         for name in tqdm(id_list):
             try:
                 motion = np.load(pjoin(opt.motion_dir, name + '.npy'))
-                if self.codebook_dir:
-                    motion_token =  np.load(pjoin(self.codebook_dir, name + '.npy'))[0] # 因为读进来是(1,L) 实际上只有1个
                 if (len(motion)) < min_motion_len or (len(motion) >= 200):
                     continue
                 text_data = []
@@ -170,9 +132,6 @@ class ControlDataset(data.Dataset):
                                                        'text':[text_dict]}
                                 new_name_list.append(new_name)
                                 length_list.append(len(n_motion))
-                                if self.codebook_dir:
-                                    motion_token_ = motion_token[int(f_tag * fps / unit_length) : int(to_tag * fps / unit_length)]
-                                    data_dict[new_name]['motion_token'] = motion_token_
 
                             except:
                                 print(line_split)
@@ -182,8 +141,6 @@ class ControlDataset(data.Dataset):
                     data_dict[name] = {'motion': motion,
                                        'length': len(motion),
                                        'text': text_data}
-                    if self.codebook_dir:
-                        data_dict[name]['motion_token'] = motion_token
                     new_name_list.append(name)
                     length_list.append(len(motion))
             except:
@@ -235,16 +192,6 @@ class ControlDataset(data.Dataset):
             controllable_joints = np.array([0, 4, 7, 10, 15, 20])
         else:
             raise NotImplementedError
-
-        # 选择控制关节
-        # num_joints = len(controllable_joints)
-        # if self.multi_joint_control:
-        #     num_joints_control = np.random.choice(np.arange(1, num_joints+1), 1) # 1~6  多关节控制
-        # else:
-        #     num_joints_control = 1
-        # choose_joint = np.random.choice(num_joints, num_joints_control, replace=False) # 选择控制的关节点
-        # # choose_name = joints_name[choose_joint]
-        # choose_joint = controllable_joints[choose_joint]
         
         if isinstance(self.control_joint, list):
             if self.control_joint == [-1]: # default -1, 随机选取控制关节数
@@ -275,24 +222,11 @@ class ControlDataset(data.Dataset):
                 choose_seq_num = int(length * self.density / 100)
         choose_seq = np.random.choice(length, choose_seq_num, replace=False) # 根据帧数选择控制的时刻帧
         choose_seq.sort()
-        # print('frames percent = ', choose_seq_num/length)
 
         traj_mask, traj_mask_263 = create_trajmask263(choose_joint, choose_seq, dataset_name=self.opt.dataset_name, mode=self.mode)
-        # # 生成控制mask
-        # traj_mask = np.zeros((self.max_motion_length, n_joints, 3)).astype(bool) # (196,22,3)
-        # traj_mask_263 = np.zeros((self.max_motion_length, 263)).astype(bool) # (196,263)
-
-        # for cj in choose_joint:
-        #     traj_mask[choose_seq, cj] = True
-        #     traj_mask_263[choose_seq, :4] = True # root
-        #     traj_mask_263[choose_seq, 4+3*(cj-1):4+3*cj] = True # ric  21*3
-        #     # if cj!=0:
-        #     #     traj_mask_263[choose_seq, 67+6*(cj-1):67+6*cj] = True # rot     21*6
-        #     # traj_mask_263[choose_seq, 193+3*cj:193+3*(cj+1)] = True # vel   22*3
 
         # normalize
-        if self.normalize_traj: # omnicontrol最原本就是不归一化轨迹
-            joints = (joints - self.raw_mean) / self.raw_std
+        joints = (joints - self.raw_mean) / self.raw_std
         joints = joints * traj_mask[:length, ...]
         return joints, traj_mask_263, traj_mask
     
@@ -396,19 +330,15 @@ class ControlDataset(data.Dataset):
         # tgt_offsets = tgt_skel.get_offsets_joints(example_data[0])
         # joints_rot2 = recover_from_rot(torch.from_numpy(motion), n_joints, tgt_skel).numpy()
         # assert np.allclose(joints, joints_rot2, atol=1e-6)
-        ##########################``
+        ##########################
+
         # control any joints at any time
-        hint, traj_mask_263, traj_mask = self.random_mask_train(joints, n_joints) # joints: (L,22,3) 从开头到这都查过了与omnicontrol一致没错
-
-
+        hint, traj_mask_263, traj_mask = self.random_mask_train(joints, n_joints) # joints: (L,22,3)
         hint = hint.reshape(hint.shape[0], -1) # (L,22*3)
 
-        # motion 263的归一化
         motion = (motion - self.mean) / self.std
-        
-        
 
-        if m_length < self.max_motion_length: # 固定输出动作长度为max_length ！！
+        if m_length < self.max_motion_length:
             hint   = np.concatenate([hint, np.zeros((self.max_motion_length - m_length, hint.shape[1])) ], axis=0)
             motion = np.concatenate([motion, np.zeros((self.max_motion_length - m_length, motion.shape[1])) ], axis=0)
 
@@ -417,40 +347,15 @@ class ControlDataset(data.Dataset):
         
 
         # 确保取得的轨迹以及traj_mask正确
-        if self.normalize_traj:
-            # joints: L,22,3
-            # hint: 196,22,3
-            assert np.allclose(joints * traj_mask[:m_length, ...] , ((hint * self.raw_std + self.raw_mean) * traj_mask)[:m_length, ...], atol=1e-4) # HumanML3D这里阈值可以是1e-6，kit只能是1e-4
-        else:
-            assert (joints*traj_mask[:m_length, ...] - hint[:m_length, ...]).sum() == 0
+        # joints: L,22,3
+        # hint: 196,22,3
+        assert np.allclose(joints * traj_mask[:m_length, ...] , ((hint * self.raw_std + self.raw_mean) * traj_mask)[:m_length, ...], atol=1e-4) # HumanML3D这里阈值可以是1e-6，kit只能是1e-4
 
-
-        if not self.codebook_dir: # 如果是训练2阶段的AE，即无codebook_dir，这里就返回
-            return word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, '_'.join(tokens), hint, traj_mask_263, traj_mask, filename
-        
-        ### 后面都是针对motion_token的处理
-        # motion_token = data['motion_token']
-        # if np.random.choice([False, False, True]):
-        #     # drop one token at the head or tail
-        #     if np.random.choice([True, False]):
-        #         motion_token = motion_token[:-1]
-        #     else:
-        #         motion_token = motion_token[1:]
-        # motion_token_len = motion_token.shape[0]
-        # if motion_token_len<10:
-        #     a = 1
-        # if motion_token_len==0:
-        #     b = 1
-        # if motion_token_len+1 < self.max_token_length:  # unit_length=4时，最大长度内，有效token和pad最多49个，1个end
-        #     motion_token = np.concatenate([motion_token, np.ones((1), dtype=int) * self.motion_end_idx, 
-        #                                    np.ones((self.max_token_length-1-motion_token_len), dtype=int) * self.motion_pad_idx], axis=0)
-        # else:
-        #     motion_token = np.concatenate([motion_token, np.ones((1), dtype=int) * self.motion_end_idx], axis=0)
-        # return caption, motion, motion_token, motion_token_len, hint, traj_mask
+        return word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, '_'.join(tokens), hint, traj_mask_263, traj_mask, filename
 
 # A wrapper class for t2m original dataset for MDM purposes
 class HumanML3D(data.Dataset):
-    def __init__(self, mode, codebook_dir, datapath='./dataset/humanml_opt.txt', split="train", control_joint=0, normalize_traj=False, multi_joint_control=False, unit_length=None, density=100, dense_control=False, **kwargs):
+    def __init__(self, mode, datapath='./dataset/humanml_opt.txt', split="train", control_joint=0, multi_joint_control=False, unit_length=None, density=100, **kwargs):
         self.mode = mode
         self.split = split
         # Configurations of T2M dataset and KIT dataset is almost the same
@@ -485,8 +390,8 @@ class HumanML3D(data.Dataset):
         self.w_vectorizer = WordVectorizer(pjoin(abs_base_path, 'glove'), 'our_vab')
         self.t2m_dataset = ControlDataset(self.opt, self.mean, self.std, self.split_file, self.w_vectorizer, mode,  
                                           control_joint=control_joint, density=density, dataset_name=self.dataset_name, 
-                                          normalize_traj=normalize_traj, multi_joint_control=multi_joint_control,
-                                          unit_length=unit_length, codebook_dir=codebook_dir, dense_control=dense_control)
+                                          multi_joint_control=multi_joint_control,
+                                          unit_length=unit_length)
         self.num_actions = 1 # dummy placeholder
 
 
@@ -503,7 +408,7 @@ class HumanML3D(data.Dataset):
 
 
 
-def DataLoader(batch_size, args, shuffle=False, codebook_dir=None, mode='train', split='train', num_workers=8, drop_last=True) : 
+def DataLoader(batch_size, args, shuffle=False, mode='train', split='train', num_workers=8, drop_last=True) : 
     if args.dataset_name == 't2m':
         datapath = './dataset/humanml_opt.txt'
     elif args.dataset_name == 'kit':
@@ -511,15 +416,12 @@ def DataLoader(batch_size, args, shuffle=False, codebook_dir=None, mode='train',
     else:
         raise NotImplementedError
     
-    dataset = HumanML3D(mode, codebook_dir, datapath=datapath, split=split, control_joint=args.control_joint, 
-                                normalize_traj=args.normalize_traj, density=args.density, 
-                                multi_joint_control=args.multi_joint_control, unit_length=2*args.down_t, 
-                                dense_control=args.dense_control)
+    dataset = HumanML3D(mode, datapath=datapath, split=split, control_joint=args.control_joint, 
+                            density=args.density, multi_joint_control=args.multi_joint_control, unit_length=2*args.down_t,)
 
     if batch_size == 1:
         num_workers = 0
     train_loader = torch.utils.data.DataLoader(dataset, batch_size, collate_fn=collate_fn if split=='test' else None, shuffle=shuffle, num_workers=num_workers, drop_last = drop_last)
-    # train_loader = torch.utils.data.DataLoader(dataset, batch_size, collate_fn=None, shuffle=shuffle, num_workers=num_workers, drop_last = drop_last)
     return train_loader
 
 def cycle(iterable):

@@ -248,7 +248,6 @@ def load_ckpt(net, ckpt_path, key=None, strict=True):
     if ckpt_path is None:
         return
     ckpt = torch.load(ckpt_path, map_location='cpu')
-    print('6 keys = ', list(ckpt.keys())[:6])
     if key:
         ckpt = ckpt[key]
 

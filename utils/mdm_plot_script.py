@@ -8,7 +8,6 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import mpl_toolkits.mplot3d.axes3d as p3
 # import cv2
 from textwrap import wrap
-import ipdb
 
 
 def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3, 3), fps=120, radius=3,

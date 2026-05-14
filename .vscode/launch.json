@@ -29,19 +29,6 @@
                     "--only_emb_loss",
                     "--resume_trans", "output/0519_mdm_el50/net_last.pth"]
         },
-        {
-            "name": "eval t2m h3d",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "eval_cmc.py",
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "args": [ "--modeltype", "diffmdm",
-                    "--resume_trans", "output/0816_diffmdm_bfgs2/net_last_.pth",
-                    "--gpu", "3",
-                    "--use_lbfgs", "1", "--replication_times", "10", "--only_t2m_s2", "1"]
-        },
-
 
         
         {
@@ -79,5 +66,21 @@
                     "--datatype", "hml",
                 ]
         },
+        {
+            "name": "eval t2m h3d",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "eval_cmc.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                    "--resume_root", "output/cmc_humanml3d/cmc_humanml3d_s1.pth",
+                    "--resume_trans", "output/cmc_humanml3d/cmc_humanml3d_s2.pth",
+                    "--gpu", "3",
+                    "--replication_times", "10",
+                    "--dataset_name", "t2m", "--control_joint", "0", "--density", "100",
+                    "--S1_diffusion_step", "100", "--S2_diffusion_step", "100", "--bfgs_lr", "0.5", "--bfgs_type", "2",
+                ]
+        }
     ]
 }

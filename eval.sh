@@ -44,3 +44,9 @@ python eval_cmc.py --roottype omni67mdm_spatial --resume_root output/1028_omnimd
 python eval_cmc.py --modeltype diffmdm --resume_trans output/1025_diffmdm_kit/net_last.pth\
  --dataset_name kit --gpu 4 --replication_times 10 --S1_diffusion_step 1000 --S2_diffusion_step 1000\
  --only_t2m_s2 1
+
+
+########################## CMC release
+python eval_cmc.py --resume_root output/cmc_humanml3d/cmc_humanml3d_s1.pth --resume_trans output/cmc_humanml3d/cmc_humanml3d_s2.pth --dataset_name t2m --control_joint 0 --density 100 --gpu 3 --use_lbfgs 1 --replication_times 1 --S1_diffusion_step 100 --S2_diffusion_step 100 --only_t2m_s2 0 --bfgs_lr 0.5 --bfgs_type 2 --use_ddim 1
+
+python eval_cmc.py --roottype omni67mdm_spatial --resume_root output/cmc_kit/cmc_kit_s1.pth --modeltype diffmdm --resume_trans output/cmc_kit/cmc_kit_s2.pth --dataset_name kit --control_joint 0 --density 100 --gpu 3 --use_lbfgs 1 --replication_times 1 --S1_diffusion_step 100 --S2_diffusion_step 100 --only_t2m_s2 0 --bfgs_lr 0.5 --bfgs_type 2 --use_ddim 1

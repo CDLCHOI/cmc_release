@@ -1,0 +1,19 @@
+name: cmc
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - numpy=1.26.4
+  - scipy=1.13.1
+  - matplotlib=3.9.4
+  - tqdm=4.67.1
+  - tensorboard==2.20.0
+  - pytorch::pytorch=2.2.1
+  - pytorch::torchvision
+  - pip:
+      - einops==0.8.1
+      - plotly==6.5.0

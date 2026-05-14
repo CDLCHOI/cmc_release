@@ -23,7 +23,7 @@ class GaussianDiffusionSimple:
     def __init__(self, args, model, modeltype, clip_model, betas) -> None:
         self.args = args
         self.model = model
-        self.modeltype = modeltype # 'ED'
+        self.modeltype = modeltype
         self.clip_model = clip_model
         self.eval_wrapper = EvaluatorMDMWrapper(args.dataset_name, torch.device('cuda'))
         self.gt_loader = None
@@ -32,21 +32,21 @@ class GaussianDiffusionSimple:
 
         if self.args.dataset_name == 't2m':
             self.n_joints = 22
-            self.mean = torch.from_numpy(np.load('dataset/HumanML3D/Mean.npy')).cuda()[None, None, ...] # dataset/HumanML3D/Mean.npy
+            self.mean = torch.from_numpy(np.load('dataset/HumanML3D/Mean.npy')).cuda()[None, None, ...]
             self.std = torch.from_numpy(np.load('dataset/HumanML3D/Std.npy')).cuda()[None, None, ...]
             self.raw_mean = torch.from_numpy(np.load('dataset/humanml_spatial_norm/Mean_raw.npy')).cuda()[None, None, ...].view(1,1,22,3) 
             self.raw_std = torch.from_numpy(np.load('dataset/humanml_spatial_norm/Std_raw.npy')).cuda()[None, None, ...].view(1,1,22,3)
         elif self.args.dataset_name == 'kit':
             self.n_joints = 21
-            self.mean = torch.from_numpy(np.load('dataset/KIT-ML/Mean.npy')).cuda()[None, None, ...].float() # dataset/HumanML3D/Mean.npy
+            self.mean = torch.from_numpy(np.load('dataset/KIT-ML/Mean.npy')).cuda()[None, None, ...].float()
             self.std = torch.from_numpy(np.load('dataset/KIT-ML/Std.npy')).cuda()[None, None, ...].float()
             self.raw_mean = torch.from_numpy(np.load('dataset/kit_spatial_norm/Mean_raw.npy')).cuda()[None, None, ...].view(1,1,21,3) 
             self.raw_std = torch.from_numpy(np.load('dataset/kit_spatial_norm/Std_raw.npy')).cuda()[None, None, ...].view(1,1,21,3)
 
         
 
-        # diffusion相关参数值
-        betas = np.array(betas, dtype=np.float64) # 每个step的噪声方差，如果总共有T个step，那betas长度就是T
+        # diffusion parameters
+        betas = np.array(betas, dtype=np.float64)
         self.betas = betas
         assert len(betas.shape) == 1, "betas must be 1-D"
         assert (betas > 0).all() and (betas <= 1).all()
@@ -127,15 +127,17 @@ class GaussianDiffusionSimple:
         self.time_list = []
 
 
-    def trainer_func_s1(self, dataloader_iter, logger, optimizer, scheduler, test_loader=None, dim=67):
+    def trainer_func_s1(self, dataloader_iter, logger, optimizer, scheduler):
         ''' train stage1 DiffRoot
         '''
-        assert 'text' in self.model.cond_mode # add at 20240627
-        min_err = 100
+        if self.args.dataset_name == 't2m':
+            dim = 67
+        elif self.args.dataset_name == 'kit':
+            dim = 64
+        assert 'text' in self.model.cond_mode
         for nb_iter in tqdm(range(1, self.args.total_iter+1), position=0, leave=True):
             batch = next(dataloader_iter)
             word_embeddings, pos_one_hots, clip_text, sent_len, gt_motion, real_length, txt_tokens, traj, traj_mask_263, traj_mask, filename = batch
-            # clip_text, gt_token, m_tokens_len = batch
             gt_motion = gt_motion.cuda()
             gt_ric = gt_motion[..., :dim]
             b, max_length, num_features = gt_ric.shape
@@ -145,8 +147,6 @@ class GaussianDiffusionSimple:
             traj_mask = traj_mask.cuda()
             real_mask = generate_src_mask(max_length, real_length) # (b,196)
             
-
-            # text_emb = self.model.encode_text(clip_text) # 2024.10.10改
 
             condition = {}
             condition['clip_text'] = clip_text
@@ -161,16 +161,12 @@ class GaussianDiffusionSimple:
             t, weights = self.schedule_sampler.sample(b, gt_ric.device) # timestep
             # t = torch.tensor([900]*b).cuda()
             x0 = gt_ric
-            noise = torch.randn_like(x0) # 生成与x0形状一样的高斯噪声
-            xt = self.q_sample(x0, t, noise=noise) # 给数据集x0加t步噪声
-            if self.args.use_lbfgs:
-                xt_tmp = self.lbfgs_guide(xt, t, condition)
-            else:
-                xt_tmp = self.guide(xt, t, condition, train=True) # spatial guidance
+            noise = torch.randn_like(x0)
+            xt = self.q_sample(x0, t, noise=noise)
+            xt_tmp = self.lbfgs_guide2(xt, t, condition)
 
             xt_input = xt_tmp
 
-            # 前向
             xt_input = xt_input.permute(0,2,1)[:,:,None]
             y={}
             y['text'] = clip_text
@@ -215,12 +211,9 @@ class GaussianDiffusionSimple:
             noise = torch.randn_like(x0) 
             xt = self.q_sample(x0, t, noise=noise) 
             
-            # selective inpainting mechanism (SIM) 训练
-            if self.args.sim:
-                if np.random.choice([0,1]):
-                    masked_xt = torch.where(traj_mask_263, x0, xt) # Forced Guidance
-                else:
-                    masked_xt = xt
+            # selective inpainting mechanism (SIM)
+            if np.random.choice([0,1]):
+                masked_xt = torch.where(traj_mask_263, x0, xt) # Forced Guidance
             else:
                 masked_xt = xt
                 
@@ -248,144 +241,55 @@ class GaussianDiffusionSimple:
             if nb_iter % self.args.save_iter == 0:
                 torch.save(self.model.state_dict(), pjoin(self.args.out_dir, 'net_last.pth'))
 
-    def trainer_func_mdm(self, dataloader_iter, logger, optimizer, scheduler, writer):
-        ''' 跑新idea的 不属于CMC '''
-        for nb_iter in tqdm(range(1, self.args.total_iter+1), position=0, leave=True):
-            batch = next(dataloader_iter)
-            word_embeddings, pos_one_hots, clip_text, sent_len, gt_motion, real_length, txt_tokens, traj, traj_mask_263, traj_mask, filename = batch
-            b, max_length, num_features = gt_motion.shape
-            gt_motion = gt_motion.cuda()
-            real_length = real_length.cuda()
-            real_mask = generate_src_mask(max_length, real_length) # (b,196)
-
-
-            t, weights = self.schedule_sampler.sample(b, gt_motion.device) # timestep
-            
-            x0 = gt_motion
-
-            # 加噪
-            noise = torch.randn_like(x0) 
-            xt = self.q_sample(x0, t, noise=noise) 
-            masked_xt = xt
-
-            # 前向
-            masked_xt = masked_xt.permute(0,2,1)[:,:,None]
-            y={'text': clip_text}
-            y['traj_mask_263'] = traj_mask_263.float()
-            pred_x0 = self.model(masked_xt, t, y=y)  # (b,196,263)
-            pred_x0 = pred_x0.squeeze(2).permute(0,2,1)
-
-            loss, msg = self.calc_mdm_loss(x0, pred_x0, real_length, real_mask, nb_iter, writer)
-            
-            # 检查 requires_grad 属性
-            # for name, param in self.model.named_parameters():
-            #     if 'clip' not in name:
-            #         print(name, param.requires_grad, param.grad is None)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-
-            # for name, param in self.model.named_parameters():
-            #     if 'clip' not in name:
-            #         print(name, param.requires_grad, param.grad is None)
-            
-            if nb_iter % self.args.print_iter == 0 :
-                logger.info(msg)
-
-            if nb_iter % self.args.save_iter == 0:
-                torch.save(self.model.state_dict(), pjoin(self.args.out_dir, 'net_last.pth'))
-
 
     def calc_loss(self, gt, pred, mean, std, traj_mask, traj, real_mask, traj_mask_263, nb_iter, need_assert=True):
         loss = 0
         loss_xyz = 0
         loss_rotate_global = 0
         loss_position_global = 0
-
-        
         dim = pred.shape[-1]
 
-        # 损失函数计算
         motion_real_mask = real_mask[..., None].repeat(1,1, dim)
 
-        # element-wise loss
+        # loss_motion
         if self.args.loss_type == 'l1':
             loss_motion = F.l1_loss(pred[motion_real_mask], gt[motion_real_mask])
         elif self.args.loss_type == 'l2':
             loss_motion = F.mse_loss(pred[motion_real_mask], gt[motion_real_mask])
         else:
             raise NotImplementedError
-
         
-        # 坐标loss
-        # if self.args.normalize_traj:
-        #     traj = traj * self.raw_std + self.raw_mean
-        # recon_xyz = recover_from_ric(pred * std[..., :dim] + mean[..., :dim], joints_num=self.n_joints)  # 反归一化再转全局xyz
-        # gt_xyz = recover_from_ric(gt * std[..., :dim] + mean[..., :dim], joints_num=self.n_joints)
-        # # ipdb.set_trace()
-        # if need_assert:
-        #     if self.args.dataset_name == 't2m':
-        #         assert torch.allclose(gt_xyz * traj_mask , traj * traj_mask, atol=1e-5) # 确保轨迹及mask是正确的
-        #     elif self.args.dataset_name == 'kit':
-        #         assert torch.allclose(gt_xyz * traj_mask / 1000, traj * traj_mask/ 1000, atol=1e-5) # 确保轨迹及mask是正确的
-
-        # scale = 1 if self.args.dataset_name == 't2m' else 0.001
-        # if self.args.loss_type == 'l1':
-        #     loss_xyz = F.l1_loss(recon_xyz[traj_mask]*scale, traj[traj_mask]*scale) # 仅约束控制轨迹
-        # elif self.args.loss_type == 'l2':
-        #     loss_xyz = F.mse_loss(recon_xyz[traj_mask]*scale, traj[traj_mask]*scale) # 仅约束控制轨迹
-
+        traj = traj * self.raw_std + self.raw_mean
+        recon_xyz = recover_from_ric(pred * std[..., :dim] + mean[..., :dim], joints_num=self.n_joints)
+        gt_xyz = recover_from_ric(gt * std[..., :dim] + mean[..., :dim], joints_num=self.n_joints)
         
-        # 应该可以删掉 留着无所谓
-        # if self.args.root_dist_loss:
-        #     gt_root = (gt * std[..., :dim] + mean[..., :dim])[..., :4]
-        #     recon_root = (pred * std[..., :dim] + mean[..., :dim])[..., :4]
-        #     loss_rotate_global, loss_position_global, gt_root_pos, pred_root_pos = root_dist_loss(gt_root, recon_root, real_mask, self.args)
-        #     loss += loss_rotate_global
-        #     loss += loss_position_global
-        # assert torch.allclose(gt_root_pos, gt_xyz[:,:,0,:])
+        if need_assert:  # 确保轨迹及mask是正确的
+            if self.args.dataset_name == 't2m':
+                assert torch.allclose(gt_xyz * traj_mask , traj * traj_mask, atol=1e-5)
+            elif self.args.dataset_name == 'kit':
+                assert torch.allclose(gt_xyz * traj_mask / 1000, traj * traj_mask/ 1000, atol=1e-5)
 
-            
+        # loss_xyz
+        scale = 1 if self.args.dataset_name == 't2m' else 0.001
+        if self.args.loss_type == 'l1':
+            loss_xyz = F.l1_loss(recon_xyz[traj_mask]*scale, traj[traj_mask]*scale)
+        elif self.args.loss_type == 'l2':
+            loss_xyz = F.mse_loss(recon_xyz[traj_mask]*scale, traj[traj_mask]*scale)
+
+        # loss_root
+        gt_root = (gt * std[..., :dim] + mean[..., :dim])[..., :4]
+        recon_root = (pred * std[..., :dim] + mean[..., :dim])[..., :4]
+        loss_rotate_global, loss_position_global, gt_root_pos, pred_root_pos = root_dist_loss(gt_root, recon_root, real_mask, self.args)
+        loss += loss_rotate_global
+        loss += loss_position_global
+        assert torch.allclose(gt_root_pos, gt_xyz[:,:,0,:])
+
         loss +=  loss_xyz
         loss = loss + loss_motion
-
         msg = f'Train. Iter {nb_iter} '
         msg += f" loss_motion. {loss_motion:.5f}, loss_xyz. {loss_xyz:.5f} "
         return loss, msg
     
-    def calc_mdm_loss(self, gt, pred, real_length, real_mask, iter, writer):
-        loss = 0
-        msg = f' Train. Iter {iter} '
-
-        dim = gt.shape[-1]
-        motion_real_mask = real_mask[..., None].repeat(1,1, dim)
-
-        loss_motion = F.mse_loss(pred[motion_real_mask], gt[motion_real_mask])
-        msg += f" loss_motion. {loss_motion:.5f}"
-
-        if not self.args.only_emb_loss:
-            loss += loss_motion
-
-        # with torch.no_grad():
-        if self.args.emb_loss:
-            gt_emb = self.eval_wrapper.get_motion_embeddings(
-                    motions=gt,
-                    m_lens=real_length
-                )
-                
-
-            pred_emb = self.eval_wrapper.get_motion_embeddings(
-                    motions=pred,
-                    m_lens=real_length
-                )
-            
-            emb_loss = F.mse_loss(gt_emb, pred_emb)
-            loss += self.args.emb_loss * emb_loss
-            msg += f" emb_loss. {emb_loss:.5f}"
-
-        return loss, msg
 
     #############################################################################################################
     #############################################################################################################
@@ -419,65 +323,41 @@ class GaussianDiffusionSimple:
         else:
             raise NotImplementedError
 
-        if self.modeltype in ['diffmdm','mdm']:
-            noise = torch.randn((B,196,motion_dim)).cuda()
-        elif self.modeltype in ['omni67', 'omni67res', 'omni67mdm_spatial', 'semboost_67', 'mdm67_spatial']:
+        if self.modeltype == 's1':
             noise = torch.randn((B,196,ric_dim)).cuda()
+        elif self.modeltype == 's2':
+            noise = torch.randn((B,196,motion_dim)).cuda()
         else:
-            print('self.modeltype = ', self.modeltype)
-            raise ValueError('Unknown model type')
+            raise ValueError(f'Unknown model type {self.modeltype}')
 
         xt = noise
         with torch.no_grad():
-            if self.modeltype in ['diffmdm'] and partial_emb is not None:
+            if self.modeltype == 's2' and partial_emb is not None:
                 xt = torch.where(model_kwargs['traj_mask_263'], partial_emb, xt) 
             for i in tqdm(indices): # 999 ~ 0
                 t = torch.tensor([i] * B).cuda() # timestep tensor
                 if self.args.use_ddim:
                     out = self.ddim_sample(xt, t, partial_emb, model_kwargs=model_kwargs)
                 else:
-                    out = self.p_sample(xt, t, partial_emb, model_kwargs=model_kwargs) # 返回x_{t-1}和x0
-                xt = out["sample"] # x_{t-1}
+                    out = self.p_sample(xt, t, partial_emb, model_kwargs=model_kwargs)
+                xt = out["sample"]
         
-        # if sys.gettrace():
-        #     self.plot_xyz_error(model_kwargs['traj'])
-
-        # 只有CMC的2阶段会做替换
-        if self.modeltype in ['diffmdm'] and with_control and partial_emb is not None: 
+        if self.modeltype == 's2' and partial_emb is not None: 
             out['sample'] = torch.where(model_kwargs['traj_mask_263'], partial_emb, out['sample']) 
         return out['sample']
 
     def p_sample(self, xt, t, partial_emb, model_kwargs=None):
-        ''' get x_{t-1}
-        '''
         B = xt.shape[0]
         out = self.p_mean_variance(xt, t, model_kwargs=model_kwargs) 
-
         '''
-        一阶段对 mean 进行guide
-        二阶段对 mean 进行替换
+        stage1: guide mean
+        stage2 :replace mean
         '''
-        if self.modeltype in ['omni67mdm_spatial']: # Spatial Guidance
-            
-            if self.args.use_lbfgs:
-                # print('use bfgs')
-                if self.args.bfgs_type == 0:
-                    out['mean'] = self.lbfgs_guide(out['mean'], t, model_kwargs)
-                elif self.args.bfgs_type == 1:
-                    out['mean'] = self.lbfgs_guide1(out['mean'], t, model_kwargs)
-                elif self.args.bfgs_type == 2:
-                    out['mean'] = self.lbfgs_guide2(out['mean'], t, model_kwargs)
-                else:
-                    raise NotImplementedError
-
-            else:
-                out['mean'] = self.guide(out['mean'], t, condition=model_kwargs)
-        elif self.modeltype in ['diffmdm']: # Forced Guidance
-            # semboost用作1阶段纯文本生成时 partial_emb=None
+        if self.modeltype == 's1': # Spatial Guidance
+            out['mean'] = self.lbfgs_guide2(out['mean'], t, model_kwargs)
+        elif self.modeltype == 's2':
             if partial_emb is not None: 
-                out['mean'] = torch.where(model_kwargs['traj_mask_263'], partial_emb, out['mean']) # 将ric替换进去
-        elif self.modeltype in ['mdm']:
-            pass
+                out['mean'] = torch.where(model_kwargs['traj_mask_263'], partial_emb, out['mean']) 
         else:
             raise NotImplementedError
 
@@ -486,19 +366,12 @@ class GaussianDiffusionSimple:
         log_var = out['log_variance']
         pred_x0 = out['pred_x0']
 
-        # if sys.gettrace():
-        #     self.guide_list.append(mean)
-
         noise = torch.randn_like(xt)
         nonzero_mask = (t != 0).float().view(-1, *([1] * (len(xt.shape) - 1))) # no noise when t == 0
-        sample_all_noisy = mean + nonzero_mask * torch.exp(0.5 * log_var) * noise # 全部加噪的认为是无条件
-        # 此处去掉了return_type为priorMDM的代码，即mask为1的位置，将noise置0，认为mask为1的位置的值视为条件，仅当return_type为priorMDM时，sample_all_noisy和sample才有区别，不然是一样的，所以sample_all_noisy其实也没啥用
-        sample = mean + nonzero_mask * torch.exp(0.5 * log_var) * noise # noise是标准正态分布，sample是通过预测噪声，计算得到方差，再通过重参数化采样得到的x_{t-1}； 替换值不加噪的认为是有条件
+        sample = mean + nonzero_mask * torch.exp(0.5 * log_var) * noise
             
-
-        return {"sample": sample,
-                'sample_all_noisy': sample_all_noisy, 
-                "pred_x0": pred_x0} # 分别是x_{t-1}和x_0
+        return {"sample": sample, # x_{t-1}
+                "pred_x0": pred_x0}
     
     def ddim_sample(self, xt, t, partial_emb, model_kwargs=None, eta=0.5):
         """
@@ -528,22 +401,10 @@ class GaussianDiffusionSimple:
         )
 
 
-        if self.modeltype in ['omni67mdm_spatial']: # Spatial Guidance
-            if self.args.use_lbfgs:
-                # print('use bfgs')
-                if self.args.bfgs_type == 0:
-                    mean_pred = self.lbfgs_guide(mean_pred, t, model_kwargs)
-                elif self.args.bfgs_type == 1:
-                    mean_pred = self.lbfgs_guide1(mean_pred, t, model_kwargs)
-                elif self.args.bfgs_type == 2:
-                    mean_pred = self.lbfgs_guide2(mean_pred, t, model_kwargs)
-                else:
-                    raise NotImplementedError
-            else:
-                mean_pred = self.guide(mean_pred, t, condition=model_kwargs)
-        if self.modeltype in ['semboost','diffmdm']: # Forced Guidance
+        if self.modeltype == 's1': # Spatial Guidance
+            mean_pred = self.lbfgs_guide2(mean_pred, t, model_kwargs)
+        if self.modeltype == 's2':
             mean_pred = torch.where(model_kwargs['traj_mask_263'], partial_emb, mean_pred) 
-
 
         nonzero_mask = (
             (t != 0).float().view(-1, *([1] * (len(xt.shape) - 1)))
@@ -556,8 +417,6 @@ class GaussianDiffusionSimple:
 
 
     def p_mean_variance(self, masked_xt, t, model_kwargs=None):
-        ''' get pred_x0
-        '''
         B = masked_xt.shape[0]
         assert t.shape == (B,)
         
@@ -569,30 +428,18 @@ class GaussianDiffusionSimple:
             sample_t = self.timestep_map[t]
         else:
             sample_t = t.clone()
-        # masked_xt = torch.ones_like(masked_xt, device=masked_xt.device) * 0.5; print(' for debug')
-        # 前向推理
-        a = time.time()
-        if self.modeltype in ['omni67mdm_spatial']:
+            
+        scale = torch.ones(B,device=torch.device('cuda')) * self.args.guidance_param
+        y = {'text':clip_text, 'scale':scale,}
+        if self.modeltype == 's1':
             xt = masked_xt.permute(0,2,1)[:,:,None]
-            # 在这里给固定噪声看看
-            # y = {'text':clip_text,  'text_emb':model_kwargs['text_emb']}
-            y = {'text':clip_text}
             if y.get('text_emb') is not None:
                 y['text_emb'] = y.get('text_emb')
-
             y['hint'] = traj.flatten(2,3)
-            # scale = torch.ones(B,device=torch.device('cuda')) * 2.5 # 引导系数
-            scale = torch.ones(B,device=torch.device('cuda')) * self.args.guidance_param
-            y['scale'] = scale
-            if self.modeltype == 'omni67res':
-                y['traj_mask_67'] = model_kwargs['traj_mask_263'][..., :67].permute(0,2,1)[:,:,None]
             pred_x0 = self.model(xt, sample_t, y=y)
             pred_x0 = pred_x0.squeeze(2).permute(0,2,1)
-        elif self.modeltype in ['diffmdm', 'mdm']:
+        elif self.modeltype == 's2':
             xt = masked_xt.permute(0,2,1)[:,:,None]
-            # scale = torch.ones(B,device=torch.device('cuda')) * 2.5 # 引导系数
-            scale = torch.ones(B,device=torch.device('cuda')) * self.args.guidance_param
-            y={'text': clip_text, 'scale':scale}
             if y.get('text_emb') is not None:
                 y['text_emb'] = y.get('text_emb')
             y['traj_mask_263'] = model_kwargs['traj_mask_263'].float()
@@ -600,22 +447,14 @@ class GaussianDiffusionSimple:
             pred_x0 = pred_x0.squeeze(2).permute(0,2,1)
         else:
             raise NotImplementedError
-        b = time.time()
-        self.time_list.append(b-a)
         
-        # if sys.gettrace():
-        #     self.predx0_list.append(pred_x0)
 
         model_variance = self.posterior_variance
         model_log_variance = self.posterior_log_variance_clipped
         model_variance = _extract_into_tensor(model_variance, t, masked_xt.shape)
         model_log_variance = _extract_into_tensor(model_log_variance, t, masked_xt.shape)
 
-        # 得到x0后去算x_{t-1}的均值，即后验均值 q(x_{t-1} | x_t, x_0)
         model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_x0, x_t=masked_xt, t=t) 
-        # if sys.gettrace():
-        #     self.mean_list.append(model_mean)
-
         assert model_mean.shape == model_log_variance.shape == pred_x0.shape == masked_xt.shape
         
         return {
@@ -664,197 +503,55 @@ class GaussianDiffusionSimple:
         x_ = x * std[..., :dim] + mean[..., :dim]
         n_joints = 22 if dim in [67, 193, 259, 263] else 21
 
-        joint_pos = recover_from_ric(x_, n_joints) # 全局xyz
-        if n_joints == 21: # KIT格式, 把毫米转为米
+        joint_pos = recover_from_ric(x_, n_joints)
+        if n_joints == 21:
             joint_pos = joint_pos * 0.001
             hint = hint * 0.001
 
         loss = torch.norm((joint_pos - hint) * mask_hint, dim=-1)
         return loss
-
-    def lbfgs_guide(self, x, t, condition, t_stopgrad=-10, scale=.5, n_guide_steps=10, train=False, min_variance=0.01):
-        
-        sample_t = t # self.timestep_map[t] if self.args.use_ddim_sample else t
-        n_joint = 22 if x.shape[-1] in [67, 193, 259, 263] else 21
-        threshold = 10 # self.timestep_map[1] if self.args.use_ddim_sample else 10
-        
-        if train:
-            if sample_t[0] < threshold:
-                n_guide_steps = 10
-            else:
-                n_guide_steps = 1
-        else:
-            if sample_t[0] < threshold:
-                n_guide_steps = 10
-            else:
-                n_guide_steps = 1
-        
-        mask_hint = condition['traj_mask']
-        # mask_hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3).sum(dim=-1, keepdim=True) != 0
-        hint = condition['traj'].clone().detach()
-        
-        if self.args.normalize_traj:
-        # process hint
-            if self.raw_std.device != hint.device:
-                self.raw_mean = self.raw_mean.to(hint.device)
-                self.raw_std = self.raw_std.to(hint.device)
-                self.mean = self.mean.to(hint.device)
-                self.std = self.std.to(hint.device)
-            # 判断是否外部给定了mean和std，在测试集时候使用
-            mean = condition.get('mean', None)
-            std = condition.get('std', None)
-            if mean is None and std is None:
-                mean = self.mean
-                std = self.std
-            hint = hint * self.raw_std + self.raw_mean
-            hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint  
-
-        with torch.enable_grad():
-            x = x.clone().detach().contiguous().requires_grad_(True)
-
-            def closure():
-                lbfgs.zero_grad()
-                loss = self.masked_joint_loss(x, self.mean, self.std, hint, mask_hint).sum()
-                loss.backward()
-                return loss
-
-            if self.modeltype == 'omni67res':
-                lbfgs = torch.optim.LBFGS([x],
-                        history_size=10, 
-                        max_iter=1,
-                        lr = 1.0,
-                        tolerance_grad=1e-6,
-                        line_search_fn="strong_wolfe")
-            else:
-                lbfgs = torch.optim.LBFGS([x],
-                        history_size=10, 
-                        max_iter=10,
-                        lr = self.args.bfgs_lr,
-                        tolerance_grad=1e-6,
-                        line_search_fn="strong_wolfe")
-            if t[0] >= t_stopgrad:
-                for _ in range(n_guide_steps):
-                    lbfgs.step(closure)
-        return x
-
-    def lbfgs_guide1(self, x, t, condition, t_stopgrad=-10, scale=.5, n_guide_steps=10, train=False, min_variance=0.01):
-        
-        sample_t = t # self.timestep_map[t] if self.args.use_ddim_sample else t
-        n_joint = 22 if x.shape[-1] in [67, 193, 259, 263] else 21
-        threshold = 10 # self.timestep_map[1] if self.args.use_ddim_sample else 10
-        
-        if train:
-            if sample_t[0] < threshold:
-                n_guide_steps = 10
-            else:
-                n_guide_steps = 1
-        else:
-            # 20241107修改后的bfgstype_1，优化部署仅包含10和100步，和bfgs2区别是最后一个step的1000步改为100步，做对照
-            if sample_t[0] < threshold:  
-                n_guide_steps = 10 # 0 ~ 9
-            else:
-                n_guide_steps = 1 # 10 ~ 999
-
-            # if sample_t[0] >= 10:
-            #     n_guide_steps = 1 # 10 ~ 999
-            # elif sample_t[0] < 10 and sample_t[0] >0:
-            #     n_guide_steps = 10  # 1 ~ 9
-            # else:
-            #     n_guide_steps = 100 # 0
-
-        lrs = np.linspace(self.args.bfgs_lr,0.1,1000)
-        lr = lrs[sample_t[0]]
-        
-        mask_hint = condition['traj_mask']
-        # mask_hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3).sum(dim=-1, keepdim=True) != 0
-        hint = condition['traj'].clone().detach()
-        
-        if self.args.normalize_traj:
-        # process hint
-            if self.raw_std.device != hint.device:
-                self.raw_mean = self.raw_mean.to(hint.device)
-                self.raw_std = self.raw_std.to(hint.device)
-                self.mean = self.mean.to(hint.device)
-                self.std = self.std.to(hint.device)
-            # 判断是否外部给定了mean和std，在测试集时候使用
-            mean = condition.get('mean', None)
-            std = condition.get('std', None)
-            if mean is None and std is None:
-                mean = self.mean
-                std = self.std
-            hint = hint * self.raw_std + self.raw_mean
-            hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint  
-
-        with torch.enable_grad():
-            x = x.clone().detach().contiguous().requires_grad_(True)
-
-            def closure():
-                lbfgs.zero_grad()
-                # loss = self.masked_joint_loss(x, self.mean, self.std, hint, mask_hint).sum()
-                loss = self.masked_joint_loss(x, self.mean, self.std, hint, mask_hint).mean()
-                loss.backward()
-                return loss
-            lbfgs = torch.optim.LBFGS([x],
-                        history_size=10, 
-                        max_iter=10*n_guide_steps,
-                        lr = lr,
-                        # tolerance_grad=1e-6,
-                        tolerance_change=1e-8,
-                        line_search_fn="strong_wolfe")
-                
-            lbfgs.step(closure)
-        return x
-    
     
     def lbfgs_guide2(self, x, t, condition):
         
-        sample_t = t # self.timestep_map[t] if self.args.use_ddim_sample else t
-        n_joint = 22 if x.shape[-1] in [67, 193, 259, 263] else 21
+        sample_t = t
+        n_joint = 22 if self.args.dataset_name == 't2m' else 21
         
-        
-        if sample_t[0] >= 10:
-            n_guide_steps = 1 # 10 ~ 999
-        elif sample_t[0] < 10 and sample_t[0] >0:
-            n_guide_steps = 10  # 1 ~ 9
+        if self.model.training:
+            n_guide_steps = 10
         else:
-            n_guide_steps = 100 # 0
+            if sample_t[0] >= 10:
+                n_guide_steps = 1 # 10 ~ 999
+            elif sample_t[0] < 10 and sample_t[0] >0:
+                n_guide_steps = 10  # 1 ~ 9
+            else:
+                n_guide_steps = 100 # 0
 
         lrs = np.linspace(self.args.bfgs_lr,0.1,1000)
         lr = lrs[sample_t[0]]
         
         mask_hint = condition['traj_mask']
-        # mask_hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3).sum(dim=-1, keepdim=True) != 0
         hint = condition['traj'].clone().detach()
         
-        if self.args.normalize_traj:
-        # process hint
-            if self.raw_std.device != hint.device:
-                self.raw_mean = self.raw_mean.to(hint.device)
-                self.raw_std = self.raw_std.to(hint.device)
-                self.mean = self.mean.to(hint.device)
-                self.std = self.std.to(hint.device)
-            # 判断是否外部给定了mean和std，在测试集时候使用
-            mean = condition.get('mean', None)
-            std = condition.get('std', None)
-            if mean is None and std is None:
-                mean = self.mean
-                std = self.std
-            hint = hint * self.raw_std + self.raw_mean
-            hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint  
+        if self.raw_std.device != hint.device:
+            self.raw_mean = self.raw_mean.to(hint.device)
+            self.raw_std = self.raw_std.to(hint.device)
+            self.mean = self.mean.to(hint.device)
+            self.std = self.std.to(hint.device)
+        hint = hint * self.raw_std + self.raw_mean
+        hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint  
 
         with torch.enable_grad():
             x = x.clone().detach().contiguous().requires_grad_(True)
 
             def closure():
                 lbfgs.zero_grad()
-                # loss = self.masked_joint_loss(x, self.mean, self.std, hint, mask_hint).sum()
                 loss = self.masked_joint_loss(x, self.mean, self.std, hint, mask_hint).mean()
                 loss.backward()
                 return loss
 
             lbfgs = torch.optim.LBFGS([x],
                         history_size=10, 
-                        max_iter=10*n_guide_steps,
+                        max_iter=10*n_guide_steps if not self.model.training else 10,
                         lr = lr,
                         tolerance_change=1e-8,
                         line_search_fn="strong_wolfe")
@@ -863,12 +560,12 @@ class GaussianDiffusionSimple:
         return x
     
 
-    def guide(self, x, t, condition, t_stopgrad=-10, scale=.5, n_guide_steps=10, train=False, min_variance=0.01):
+    def omnicontrol_guide(self, x, t, condition, t_stopgrad=-10, scale=.5, n_guide_steps=10, train=False, min_variance=0.01):
         """
         Spatial guidance
         """
         sample_t = self.timestep_map[t] if self.args.use_ddim else t
-        n_joint = 22 if x.shape[-1] in [67, 193, 259, 263] else 21
+        n_joint = 22 if self.args.dataset_name == 't2m' else 21
         model_log_variance = _extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
         model_variance = torch.exp(model_log_variance)
         
@@ -885,42 +582,27 @@ class GaussianDiffusionSimple:
                 n_guide_steps = 500
             else:
                 n_guide_steps = 10
-            # if self.modeltype == 'omni67res':
-            #     n_guide_steps = 5
         
 
         mask_hint = condition['traj_mask']
         # mask_hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3).sum(dim=-1, keepdim=True) != 0
         hint = condition['traj'].clone().detach()
-        if self.args.normalize_traj:
-            # process hint
-            if self.raw_std.device != hint.device:
-                self.raw_mean = self.raw_mean.to(hint.device)
-                self.raw_std = self.raw_std.to(hint.device)
-                self.mean = self.mean.to(hint.device)
-                self.std = self.std.to(hint.device)
-            # 判断是否外部给定了mean和std，在测试集时候使用
-            mean = condition.get('mean', None)
-            std = condition.get('std', None)
-            if mean is None and std is None:
-                mean = self.mean
-                std = self.std
-            hint = hint * self.raw_std + self.raw_mean
-            hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint
+        if self.raw_std.device != hint.device:
+            self.raw_mean = self.raw_mean.to(hint.device)
+            self.raw_std = self.raw_std.to(hint.device)
+            self.mean = self.mean.to(hint.device)
+            self.std = self.std.to(hint.device)
+        hint = hint * self.raw_std + self.raw_mean
+        hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint
 
         
         if not train:
-            scale = self.calc_grad_scale(mask_hint[..., :1]) * self.sgd_weight # omnicontrol这里的mask输入shape是 (b,196,22,1)
-            # if self.modeltype == 'omni67res':
-            #     scale = torch.ones_like(scale, device=scale.device) * 1
-            # a = torch.linspace(1, 3, steps=196).to(mask_hint.device)
-            # weight = (a**1)[None, :, None]
-            # scale = scale * 3
+            scale = self.calc_grad_scale(mask_hint[..., :1])
+
 
         for _ in range(n_guide_steps):
-            loss, grad = self.gradients(x, self.mean, self.std, hint, mask_hint, condition['real_length']) # x和hint都是未归一化的
-            # if t[0] == 0:
-                # print('loss.sum() = ',loss.sum())
+            loss, grad = self.gradients(x, self.mean, self.std, hint, mask_hint, condition['real_length'])
+
             grad = model_variance * grad
             if t[0] >= t_stopgrad:
                 x = x - scale * grad
@@ -931,11 +613,7 @@ class GaussianDiffusionSimple:
         num_keyframes = mask_hint.sum(dim=1).squeeze(-1)
         max_keyframes = num_keyframes.max(dim=1)[0]
         scale = 20 / max_keyframes
-        if self.modeltype in ['omni67', 'omni193', 'omni259', 'omnicontrol', 'omni67mdm_spatial', 'omni263mdm_spatial',
-                              'omni67res', 'omni263mdm_fuse']:
-            return scale.unsqueeze(-1).unsqueeze(-1)
-        else:
-            raise NotImplementedError
+        return scale.unsqueeze(-1).unsqueeze(-1)
 
     def gradients(self, x, mean, std, hint, mask_hint, real_length, joint_ids=None):
         with torch.enable_grad():
@@ -944,53 +622,13 @@ class GaussianDiffusionSimple:
             dim = x.shape[-1]
             x_ = x * std[..., :dim] + mean[..., :dim]
             n_joints = 22 if dim in [67, 193, 259, 263] else 21
-            joint_pos = recover_from_ric(x_, n_joints) # 全局xyz (b,196,22,3)
-            if n_joints == 21: # 猜测是KIT格式, 就要把 毫米转为米？
+            joint_pos = recover_from_ric(x_, n_joints) # (b,196,22,3)
+            if n_joints == 21:
                 joint_pos = joint_pos * 0.001
                 hint = hint * 0.001
 
             loss = torch.norm((joint_pos - hint) * mask_hint, dim=-1)
             grad = torch.autograd.grad([loss.sum()], [x])[0] # （b, l, 67）
-            # the motion in HumanML3D always starts at the origin (0,y,0), so we zero out the gradients for the root joint
-            # plt.clf(); plt.ylim(-0.1,0.5); plt.plot(grad[0,:,0].cpu().numpy()); plt.title('root orientation'); plt.savefig('root_orientation.png')
-            # plt.clf(); plt.ylim(-0.1,0.5); plt.plot(grad[0,:,1].cpu().numpy()); plt.title('root x'); plt.savefig('root_x.png')
-            # plt.clf(); plt.ylim(-0.2,0.5); plt.plot(grad[0,:,2].cpu().numpy()); plt.title('root z'); plt.savefig('root_z.png')
-            # plt.clf(); plt.ylim(-0.2,0.5); plt.plot(grad[0,:,3].cpu().numpy()); plt.title('root y'); plt.savefig('root_y.png')
-            # grad[:, 0, :] = 0 # 第0帧梯度置0
-            # ##### 梯度误差修正
-            # control_batch_id = mask_hint.sum(1).sum(-1).nonzero() # (b, 2)
-            # cb = control_batch_id[:,0]
-            # ci = control_batch_id[:,1]
-            # err = torch.norm(((joint_pos - hint) * mask_hint)[cb,:,ci,:], dim=-1, keepdim=True) # (b,196,1)
-            # grad *= err # 0.61
-
-            
-            # coef_one = torch.ones((b,196,1)).cuda()
-            ## 第1种
-            # coef = torch.arange(real_length.item()).float().cuda() - real_length//2
-            # coef += (coef==0).float()
-            # coef = coef.abs() ** coef.sign()
-            # coef= torch.cat([coef[None,:,None], torch.zeros([1,196-60,1]).cuda()], dim=1)
-            ## 第2种
-            # coef = torch.arange(real_length.item()).float().cuda() - real_length//2
-            # coef += (coef==0).float()
-            # coef[coef<0] = 1 # 一般控制不佳都是发生在后半段所以这么试
-            # coef= torch.cat([coef[None,:,None], torch.zeros([1,196-60,1]).cuda()], dim=1)
-            ### batch操作
-            # for i in range(b):
-            #     coef = torch.arange(real_length[i].item()).float().cuda() - real_length[i].item()//2
-            #     coef += (coef==0).float()
-            #     coef[coef<0] = 1 # 一般控制不佳都是发生在后半段所以这么试
-            #     coef= torch.cat([coef[:,None], torch.zeros([196-real_length[i].item(),1]).cuda()], dim=0)
-            #     coef_zero[i] = coef
-            ## 第3种，直接按帧来，第0帧除以196，最后一帧不变
-
-            # grad *= coef_one
-            # grad[:,:,[1,2]] *= coef
-            # grad[:,:,[1,2]] *= err
-
-            # if self.args.root_zero_grad:
-            #     grad[:, :, :4] = 0
             x.detach()
         return loss, grad
     
@@ -1004,8 +642,7 @@ class GaussianDiffusionSimple:
         mask_hint = traj.view(traj.shape[0], traj.shape[1], 22, 3).sum(dim=-1, keepdim=True) != 0  
         mean = self.mean[..., :67] if '67' in self.modeltype else self.mean
         std = self.std[..., :67] if '67' in self.modeltype else self.std
-        if self.args.normalize_traj:
-            traj = traj * self.raw_std + self.raw_mean
+        traj = traj * self.raw_std + self.raw_mean
 
         b = traj.shape[0]
         if b==1:
@@ -1070,70 +707,6 @@ class GaussianDiffusionSimple:
         del self.predx0_list[:]
         del self.mean_list[:]
         del self.guide_list[:]
-
-    # def plot_xyz_error(self, traj):
-    #     b = traj.shape[0]
-    #     mask_hint = traj.view(traj.shape[0], traj.shape[1], 22, 3).sum(dim=-1, keepdim=True) != 0  
-    #     mean = self.mean[..., :67] if '67' in self.modeltype else self.mean
-    #     std = self.std[..., :67] if '67' in self.modeltype else self.std
-    #     if self.args.normalize_traj:
-    #         traj = traj * self.raw_std + self.raw_mean
-
-    #     s = 0  # 选择哪个数据
-    #     idx=torch.linspace(0,b*1000,1001).int() + s
-    #     x0s = torch.cat(self.predx0_list, dim=0)[idx[:1000]] * std + mean # (1,196,67)
-    #     means = torch.cat(self.mean_list, dim=0)[idx] * std + mean
-    #     guides = torch.cat(self.guide_list, dim=0)[idx[:1000]] * std + mean
-    #     x0s_xyz = recover_from_ric(x0s, 22) # (1,196,22,3)
-    #     means_xyz = recover_from_ric(means, 22)
-    #     guides_xyz = recover_from_ric(guides, 22)
-    #     # traj = traj.repeat(1000,1,1,1)
-    #     # traj_mask = traj_mask.repeat(1000,1,1,1)
-        
-    #     # x0_err = F.l1_loss(x0s_xyz[traj_mask], traj[traj_mask])
-    #     # mean_err = F.l1_loss(means_xyz[traj_mask], traj[traj_mask])
-    #     # guide_err = F.l1_loss(guides_xyz[traj_mask], traj[traj_mask])
-    #     from utils.metrics import control_l2
-    #     x0_err = []
-    #     mean_err = []
-    #     guide_err = []
-    #     b = x0s.shape[0]//self.num_timesteps
-    #     for i in range(self.num_timesteps):
-    #         a = control_l2(x0s_xyz[i:i+1].cpu().numpy(), traj[s:s+1].cpu().numpy(), mask_hint[s:s+1].cpu().numpy()).sum() / mask_hint[s:s+1].sum() 
-    #         b = control_l2(means_xyz[b*i:b*(i+1)].cpu().numpy(), traj.cpu().numpy(), mask_hint.cpu().numpy()).sum() / mask_hint.sum() 
-    #         c = control_l2(guides_xyz[i:i+1].cpu().numpy(), traj[s:s+1].cpu().numpy(), mask_hint[s:s+1].cpu().numpy()).sum() / mask_hint[s:s+1].sum() 
-    #         x0_err.append(a.item())
-    #         # mean_err.append(b.item())
-    #         guide_err.append(c.item())
-
-        
-    #     x = np.arange(self.num_timesteps)
-    #     x0_err = np.array(x0_err)
-    #     # mean_err = np.array(mean_err)
-    #     guide_err = np.array(guide_err)
-    #     print('pred_x0 err = ', a.item())
-    #     # print('posterior err = ', b.item())
-    #     print('guide err = ', c.item())
-    #     print('min guide err = ', guide_err.min())
-    #     print('time cost = ', np.array(self.time_list).mean())
-
-        
-    #     plt.plot(x, x0_err, color='r')
-    #     # plt.plot(x, mean_err, color='g')
-    #     plt.plot(x, guide_err, color='b')
-    #     plt.savefig('0_1000.png')
-
-    #     # if os.path.exists('x0_err_s1.npy'):
-    #     #     np.save('x0_err_s2.npy', x0_err)
-    #     #     np.save('mean_err_s2.npy', mean_err)
-    #     #     np.save('guide_err_s2.npy',guide_err)
-    #     # else:
-
-    #     np.save('x0_err_s1.npy', x0_err)
-    #     # np.save('mean_err_s1.npy', mean_err)
-    #     np.save('guide_err_s1.npy',guide_err)
-
-
 
 
 

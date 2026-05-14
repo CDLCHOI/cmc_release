@@ -47,8 +47,6 @@ class CompADCGeneratedDataset(Dataset):
             #encode text
             # text_emb = diffusion.model.model.encode_text(clip_text)
 
-            if args.stage2_no_root_y and (0 not in args.control_joint):
-                traj_mask_263[..., 3] = False
 
             model_kwargs = {}
             model_kwargs['traj'] = traj.clone()
@@ -69,24 +67,13 @@ class CompADCGeneratedDataset(Dataset):
             mm_motions = []
 
             ########################################################
-            ########################  1阶段 ########################
+            ########################  S1 ###########################
             ########################################################
             if not args.only_t2m_s2:
-                if args.roottype in ['omni67mdm_spatial']: 
-                    if args.gtric_fortest:
-                        pred_ric = gt_ric
-                    else:
-                        pred_ric = diffusion_root.p_sample_loop(partial_emb=None, model_kwargs=model_kwargs,batch_size=args.batch_size)
-                    
-                    # control_id = traj_mask[0].sum(0).sum(-1).nonzero()
-                    # if args.roottype == 'omnicontrol':
-                    #     sample = pred_ric
-                else:
-                    raise NotImplementedError
+                pred_ric = diffusion_root.p_sample_loop(partial_emb=None, model_kwargs=model_kwargs,batch_size=args.batch_size)
             
-
             ########################################################
-            ########################  2阶段 ########################  
+            ########################  S2  ##########################  
             ########################################################
             for t in range(repeat_times):
                 if args.only_t2m_s2: # 仅2阶段text to motion
@@ -99,10 +86,6 @@ class CompADCGeneratedDataset(Dataset):
                         partial_emb[..., :64] = pred_ric[..., :64]  
                 sample = diffusion.p_sample_loop(partial_emb, with_control=True, model_kwargs=model_kwargs, batch_size=args.batch_size) # (b, 196, 263)
             
-
-                ########################################################
-                ########################################################
-                ########################################################
 
                 if t == 0:
                     sub_dicts = [{'motion': sample[bs_i].squeeze().cpu().numpy(),
@@ -129,14 +112,11 @@ class CompADCGeneratedDataset(Dataset):
                                 'cap_len': sent_len[bs_i].item(),
                                 'mm_motions': mm_motions[bs_i::gen_loader.batch_size], 
                                 } for bs_i in range(gen_loader.batch_size)]
-            a = 1
         
         self.generated_motion = generated_motion
         self.mm_generated_motion = mm_generated_motions
         self.w_vectorizer = gen_loader.dataset.w_vectorizer
 
-        self.eval_mean = np.load('/home/deli/project/MARDM/utils/eval_mean_std/t2m/eval_mean.npy')
-        self.eval_std = np.load('/home/deli/project/MARDM/utils/eval_mean_std/t2m/eval_std.npy')
 
     def __len__(self):
         return len(self.generated_motion)
@@ -147,7 +127,6 @@ class CompADCGeneratedDataset(Dataset):
         sent_len = data['cap_len']
 
         if self.dataset.mode == 'eval':
-            
             normed_motion = motion
             denormed_motion = self.dataset.t2m_dataset.inv_transform(normed_motion)
             renormed_motion = (denormed_motion - self.dataset.mean_for_eval) / self.dataset.std_for_eval  # according to T2M norms
