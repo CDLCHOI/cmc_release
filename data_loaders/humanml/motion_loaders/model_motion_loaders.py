@@ -56,15 +56,3 @@ def get_control_dataset(args, ground_truth_loader, clip_model, diffusion_root, d
     print('Generated Dataset Loading Completed!!!')
     return motion_loader, mm_motion_loader
 
-def get_fuse_dataset(args, ground_truth_loader, clip_model, diffusion, mm_num_samples, mm_num_repeats, num_samples_limit):
-    opt = {
-        'name': 'test',  # FIXME
-    }
-    print('Generating %s ...' % opt['name'])
-    dataset = CompFuseGeneratedDataset(args, ground_truth_loader, clip_model, diffusion, mm_num_samples, mm_num_repeats, num_samples_limit)
-    mm_dataset = MMGeneratedDataset(opt, dataset, ground_truth_loader.dataset.w_vectorizer)
-
-    motion_loader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn, drop_last=True, num_workers=0, shuffle=False)
-    mm_motion_loader = DataLoader(mm_dataset, batch_size=1, num_workers=1)
-    print('Generated Dataset Loading Completed!!!')
-    return motion_loader, mm_motion_loader
