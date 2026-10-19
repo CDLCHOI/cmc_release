@@ -2,7 +2,7 @@
 # Coordinating Multiple Conditions for Trajectory-Controlled Human Motion Generation (TMM 2026)
 
 [![arXiv](https://img.shields.io/badge/arXiv-2605.13729-B31B1B.svg?style=flat-square&logo=arxiv)](https://arxiv.org/abs/2605.13729)
-[![Project Page](https://img.shields.io/badge/Project-Page-blue.svg?style=flat-square)](https://cdlchoi.github.io/cmc_page/)
+[![Project Page](https://img.shields.io/badge/Project-Page-blue.svg?style=flat-square)](https://cdlchoi.github.io/projects/CMC)
 
 This is the official PyTorch implementation for the paper **"Coordinating Multiple Conditions for Trajectory-Controlled Human Motion Generation"**.
 
